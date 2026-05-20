@@ -17,9 +17,10 @@ from tenacity import (
 )
 
 from src.config import VideoProvider, settings
-from src.models import Reference, RunResult, RunStatus, ScriptOutput
+from src.models import CreativeBrief, Reference, RunResult, RunStatus, ScriptOutput
 from src.steps import (
     AssemblerStep,
+    DirectorStep,
     ScriptGeneratorStep,
     StyleExtractorStep,
     SubtitleGeneratorStep,
@@ -44,6 +45,7 @@ class Pipeline:
         self.steps: list[Step] = steps or [
             ScriptGeneratorStep(),
             StyleExtractorStep(),
+            DirectorStep(),
             VoiceGeneratorStep(),
             VideoGeneratorStep(),
             SubtitleGeneratorStep(),
@@ -61,6 +63,7 @@ class Pipeline:
         soul_id: str | None = None,
         voiceless: bool = False,
         use_keyframes: bool = False,
+        brief: CreativeBrief | None = None,
     ) -> RunResult:
         """Run the pipeline end-to-end, or only up through `pause_after`.
 
@@ -86,6 +89,7 @@ class Pipeline:
             soul_id=soul_id,
             voiceless=voiceless,
             use_keyframes=use_keyframes,
+            brief=brief,
         )
         _persist_result(result, output_dir)
 
@@ -97,6 +101,7 @@ class Pipeline:
             "references": refs,
             "soul_id": soul_id,
             "use_keyframes": use_keyframes,
+            "brief": brief,
             # Skip ElevenLabs if either: the provider has native audio (Veo),
             # or the caller explicitly asked for a voiceless cinematic reel
             # (music-only, typography-led — matches the brand-video
@@ -144,6 +149,7 @@ class Pipeline:
             "references": list(result.references),
             "soul_id": result.soul_id,
             "use_keyframes": result.use_keyframes,
+            "brief": result.brief,
             "script": edited_script,
             # Mirror the same skip rules as `run()` — Veo has native audio,
             # and a voiceless run was the operator's explicit choice (e.g.
@@ -193,6 +199,17 @@ class Pipeline:
                 _persist_result(result, output_dir)
                 context = await _run_step_with_retry(step, context)
 
+                # Persist intermediate artefacts so the detail page can
+                # surface them as soon as each step completes (script,
+                # shot plan), not just at the end of the run.
+                if step.name == "script_generator":
+                    result.script = context.get("script") or result.script
+                elif step.name == "director":
+                    plan = context.get("shot_plan")
+                    if plan is not None:
+                        result.shot_plan = plan
+                _persist_result(result, output_dir)
+
                 if pause_after is not None and step.name == pause_after:
                     result.status = RunStatus.SCRIPT_READY
                     result.current_step = None
@@ -204,6 +221,9 @@ class Pipeline:
             result.finished_at = datetime.now(UTC)
             result.current_step = None
             result.script = context.get("script") or result.script
+            plan = context.get("shot_plan")
+            if plan is not None:
+                result.shot_plan = plan
             assembled = context.get("assembled")
             if assembled is not None:
                 result.final_video_path = assembled.final_video_path

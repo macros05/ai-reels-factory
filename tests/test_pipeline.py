@@ -366,6 +366,7 @@ def test_api_run_creates_run(monkeypatch: pytest.MonkeyPatch) -> None:
         soul_id: str | None = None,
         voiceless: bool = False,
         use_keyframes: bool = False,
+        brief: Any = None,
     ) -> None:
         return None
 
@@ -428,6 +429,7 @@ def test_api_run_accepts_provider_override(monkeypatch: pytest.MonkeyPatch) -> N
         soul_id: str | None = None,
         voiceless: bool = False,
         use_keyframes: bool = False,
+        brief: Any = None,
     ) -> None:
         captured["topic"] = topic
         captured["provider"] = provider

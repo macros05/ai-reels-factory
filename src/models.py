@@ -39,6 +39,72 @@ class Reference(BaseModel):
     bytes: int
 
 
+class CreativeBrief(BaseModel):
+    """Optional structured brief the user can attach to a topic.
+
+    Everything is optional — a bare topic still works — but when provided it
+    pushes the script generator and the director toward a much sharper output
+    than free-text alone could. Concatenated into the user prompt for Claude,
+    so every field maps to natural-language guidance.
+    """
+
+    topic: str
+    audience: str | None = None
+    tone: list[str] = Field(default_factory=list)
+    mood: list[str] = Field(default_factory=list)
+    visual_vibe: list[str] = Field(default_factory=list)
+    palette: str | None = None
+    cta_goal: str | None = None
+    extra_notes: str | None = None
+
+
+class Shot(BaseModel):
+    """A single shot in the director's frame-by-frame plan.
+
+    Each shot maps 1:1 to a clip the video provider generates. The director
+    fills in concrete cinematography (shot size, lens, camera move, lighting)
+    plus a time-coded action breakdown so the model has unambiguous direction.
+    """
+
+    index: int
+    shot_size: Literal[
+        "extreme_close_up",
+        "close_up",
+        "medium_close_up",
+        "medium",
+        "medium_wide",
+        "wide",
+        "extreme_wide",
+    ] = "medium_close_up"
+    camera_move: str = "handheld push-in"
+    lens_mm: int = 35
+    aperture: str = "f/2.0"
+    lighting: str = "soft natural daylight, warm key, gentle fill"
+    location: str = ""
+    wardrobe: str = ""
+    props: list[str] = Field(default_factory=list)
+    action_beats: list[str] = Field(default_factory=list)
+    dialogue_excerpt: str = ""
+    emotion: str = "calm, grounded"
+    color_palette: str = ""
+    transition_in: str = "hard cut"
+    transition_out: str = "hard cut"
+    duration_seconds: float = 5.0
+    # The fully-composed prompt the video generator should send to Higgsfield.
+    # If empty, the video step falls back to script.visual_prompts[index].
+    final_prompt: str = ""
+
+
+class ShotPlan(BaseModel):
+    """The full director's plan for a reel."""
+
+    title: str = ""
+    logline: str = ""
+    style_brief: str = ""
+    persona_lock: str = ""
+    shots: list[Shot] = Field(default_factory=list)
+
+
 class ScriptOutput(BaseModel):
     """Output of the script generation step."""
 
@@ -103,6 +169,13 @@ class RunResult(BaseModel):
     # control than pure text-to-video. Persisted alongside voiceless so the
     # /confirm flow propagates it.
     use_keyframes: bool = False
+    # Director's frame-by-frame plan. Populated by DirectorStep after the
+    # script step; consumed by video_generator to feed Higgsfield. Optional
+    # so legacy runs without a plan still load.
+    shot_plan: ShotPlan | None = None
+    # Structured brief, when provided. Persisted so the editor and the
+    # detail view can show what context drove the run.
+    brief: CreativeBrief | None = None
 
 
 CharacterStatus = Literal["training", "ready", "failed"]

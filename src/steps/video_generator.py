@@ -35,7 +35,7 @@ from src.clients.higgsfield import (
     get_higgsfield_cli,
 )
 from src.config import VideoProvider, settings
-from src.models import ScriptOutput, VoiceOutput
+from src.models import ScriptOutput, ShotPlan, VoiceOutput
 
 
 class VideoGeneratorStep:
@@ -81,7 +81,25 @@ class VideoGeneratorStep:
         clip_duration = settings.clip_duration_for(provider)
 
         style_brief = context.get("style_brief", "").strip()
-        prompts = list(script.visual_prompts[:num_clips])
+        plan: ShotPlan | None = context.get("shot_plan")
+        # Prefer the director's final_prompt per shot when available; fall
+        # back to the script's visual_prompts so older runs still work.
+        if plan and plan.shots:
+            prompts = [
+                (s.final_prompt or "").strip() for s in plan.shots[:num_clips]
+            ]
+            # Backfill any empty director prompt from the script (defensive
+            # for runs where the director soft-failed on a single shot).
+            for i, p in enumerate(prompts):
+                if not p:
+                    backup = (
+                        script.visual_prompts[i]
+                        if i < len(script.visual_prompts)
+                        else script.persona_description
+                    )
+                    prompts[i] = backup
+        else:
+            prompts = list(script.visual_prompts[:num_clips])
         if len(prompts) < num_clips:
             fallback = prompts[-1] if prompts else script.persona_description
             prompts.extend([fallback] * (num_clips - len(prompts)))

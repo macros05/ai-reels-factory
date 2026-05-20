@@ -22,7 +22,11 @@ dependencies = [
     "python-jose[cryptography]>=3.3.0",
     "slowapi>=0.1.9",
     "yt-dlp>=2024.10.7",
+    "mcp>=1.2.0",
 ]
+
+[project.scripts]
+reels-mcp = "src.mcp_server:main"
 
 [project.optional-dependencies]
 dev = [

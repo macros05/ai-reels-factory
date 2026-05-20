@@ -42,7 +42,16 @@ from src.api.characters import resume_pending_trainings
 from src.api.characters import router as characters_router
 from src.clients.higgsfield import HiggsfieldCLI, HiggsfieldError, get_higgsfield_cli
 from src.config import PROVIDER_COST_CREDITS, VideoProvider, settings
-from src.models import Reference, ReferenceKind, RunResult, RunStatus, ScriptOutput
+from src.models import (
+    CreativeBrief,
+    Reference,
+    ReferenceKind,
+    RunResult,
+    RunStatus,
+    ScriptOutput,
+    Shot,
+    ShotPlan,
+)
 from src.pipeline import Pipeline
 from src.utils.characters_db import get_characters_db
 from src.utils.youtube import (
@@ -147,6 +156,8 @@ def _run_summary(r: RunResult) -> dict[str, Any]:
 def _run_detail(r: RunResult) -> dict[str, Any]:
     summary = _run_summary(r)
     summary["script"] = r.script.model_dump() if r.script else None
+    summary["shot_plan"] = r.shot_plan.model_dump() if r.shot_plan else None
+    summary["brief"] = r.brief.model_dump() if r.brief else None
     summary["caption"] = None
     caption_file = settings.output_dir / r.run_id / "caption.txt"
     if caption_file.exists():
@@ -164,6 +175,7 @@ async def _execute_run(
     soul_id: str | None = None,
     voiceless: bool = False,
     use_keyframes: bool = False,
+    brief: CreativeBrief | None = None,
 ) -> None:
     pipeline = Pipeline()
     try:
@@ -177,6 +189,7 @@ async def _execute_run(
             soul_id=soul_id,
             voiceless=voiceless,
             use_keyframes=use_keyframes,
+            brief=brief,
         )
     except Exception as exc:
         logger.exception("pipeline crashed")
@@ -344,6 +357,19 @@ async def create_run(
     # --start-image for production-grade composition control.
     use_keyframes = bool(body.get("use_keyframes", False))
 
+    # Optional structured creative brief. Validated by pydantic so a
+    # malformed payload becomes a clean 400 instead of crashing the pipeline.
+    brief_payload = body.get("brief")
+    brief: CreativeBrief | None = None
+    if isinstance(brief_payload, dict):
+        # Topic in brief mirrors the top-level topic — keep them in sync so
+        # downstream consumers only have to read one.
+        brief_payload = {**brief_payload, "topic": topic}
+        try:
+            brief = CreativeBrief.model_validate(brief_payload)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"invalid brief: {exc}") from exc
+
     # Optional character (Soul-ID). If supplied we validate that it exists
     # locally and is `ready` — otherwise the run would fail mid-pipeline.
     soul_id_raw = body.get("soul_id")
@@ -386,6 +412,9 @@ async def create_run(
         provider=chosen_provider,
         references=_drain_pending_refs(run_id),
         soul_id=soul_id,
+        voiceless=voiceless,
+        use_keyframes=use_keyframes,
+        brief=brief,
     )
     async with _LOCK:
         _RUN_STATE[run_id] = result
@@ -405,6 +434,7 @@ async def create_run(
         soul_id,
         voiceless,
         use_keyframes,
+        brief,
     )
     return {
         "run_id": run_id,
@@ -412,6 +442,7 @@ async def create_run(
         "provider": chosen_provider,
         "soul_id": soul_id,
         "subtitles": burn_subtitles,
+        "brief": brief.model_dump() if brief else None,
     }
 
 
@@ -461,6 +492,107 @@ async def confirm_run(
 @api_router.get("/runs")
 async def list_runs() -> dict[str, Any]:
     return {"runs": [_run_summary(r) for r in _all_runs()]}
+
+
+@api_router.put("/runs/{run_id}/shot-plan")
+async def update_shot_plan(run_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Overwrite the persisted ShotPlan for a run.
+
+    Used by the detail view to let an operator hand-tune individual shots
+    before resuming a paused run, and by the MCP server tools to
+    programmatically refine the plan from outside.
+    """
+    runs = {r.run_id: r for r in _all_runs()}
+    r = runs.get(run_id)
+    if r is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    try:
+        plan = ShotPlan.model_validate(body)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"invalid shot_plan: {exc}") from exc
+    r.shot_plan = plan
+    output_dir = settings.output_dir / run_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "result.json").write_text(
+        r.model_dump_json(indent=2), encoding="utf-8"
+    )
+    async with _LOCK:
+        _RUN_STATE[run_id] = r
+    return {"run_id": run_id, "shot_plan": plan.model_dump()}
+
+
+@api_router.post("/runs/{run_id}/shot-plan/refine")
+async def refine_shot(run_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Refine a single shot via Claude using a natural-language instruction.
+
+    Body: {"shot_index": int, "instruction": str}
+    Returns the updated shot. Persisted alongside the rest of the plan.
+    """
+    from anthropic import AsyncAnthropic
+
+    shot_index = body.get("shot_index")
+    instruction = str(body.get("instruction") or "").strip()
+    if not isinstance(shot_index, int):
+        raise HTTPException(status_code=400, detail="shot_index (int) is required")
+    if not instruction:
+        raise HTTPException(status_code=400, detail="instruction is required")
+
+    runs = {r.run_id: r for r in _all_runs()}
+    r = runs.get(run_id)
+    if r is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    if r.shot_plan is None or not r.shot_plan.shots:
+        raise HTTPException(status_code=409, detail="run has no shot_plan yet")
+    if not (0 <= shot_index < len(r.shot_plan.shots)):
+        raise HTTPException(
+            status_code=400,
+            detail=f"shot_index {shot_index} out of range (0..{len(r.shot_plan.shots) - 1})",
+        )
+
+    shot = r.shot_plan.shots[shot_index]
+    client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+    system = (
+        "Eres un director de cine. Recibes un shot existente en JSON y una "
+        "instrucción del operador. Devuelves SIEMPRE un único objeto JSON con "
+        "EL MISMO esquema del shot, ajustado según la instrucción. Mantén el "
+        "index y duration_seconds. No incluyas markdown, sólo JSON."
+    )
+    user = (
+        f"SHOT ACTUAL:\n{shot.model_dump_json(indent=2)}\n\n"
+        f"PERSONA LOCK (mantener):\n{r.shot_plan.persona_lock}\n\n"
+        f"STYLE BRIEF (mantener):\n{r.shot_plan.style_brief}\n\n"
+        f"INSTRUCCIÓN DEL OPERADOR:\n{instruction}\n\n"
+        "Devuelve el shot ajustado completo, en JSON."
+    )
+    try:
+        message = await client.messages.create(
+            model=settings.anthropic_model,
+            max_tokens=2048,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+        )
+        raw = "".join(
+            block.text for block in message.content if getattr(block, "type", None) == "text"
+        ).strip()
+        if raw.startswith("```"):
+            raw = raw.strip("`")
+            if raw.lower().startswith("json"):
+                raw = raw[4:].strip()
+        new_shot = Shot.model_validate(json.loads(raw))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"director refine failed: {exc}") from exc
+
+    new_shot.index = shot.index
+    new_shot.duration_seconds = shot.duration_seconds
+    r.shot_plan.shots[shot_index] = new_shot
+    output_dir = settings.output_dir / run_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "result.json").write_text(
+        r.model_dump_json(indent=2), encoding="utf-8"
+    )
+    async with _LOCK:
+        _RUN_STATE[run_id] = r
+    return {"run_id": run_id, "shot_index": shot_index, "shot": new_shot.model_dump()}
 
 
 @api_router.get("/runs/{run_id}")
