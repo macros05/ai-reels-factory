@@ -317,26 +317,141 @@ class VideoGeneratorStep:
             start_image_uuid=start_image_uuid,
             audio_uuid=audio_uuid,
         )
-        motion_prompt = f"{prompt.rstrip('. ')}. {settings.motion_prompt_suffix}"
-        logger.info(
-            f"[video_generator] {provider} clip {index} "
-            f"{'(i2v)' if start_image_uuid else '(t2v)'} "
-            f"{'+ audio' if audio_uuid else ''} → {prompt[:80]}…"
+
+        # Multi-tier fallback so a single Higgsfield 500 / "prompt too long"
+        # / "broken audio UUID" doesn't tank the whole run. Two axes:
+        #   1) Prompt length: full → shortened → minimal.
+        #   2) Audio sync: with audio → WITHOUT audio (drops in-call
+        #      lip-sync; voice is muxed in the assembler instead).
+        # We exhaust the prompt-length axis WITH audio first, then again
+        # WITHOUT audio. That way we only sacrifice lip-sync as a last
+        # resort, and runs survive Higgsfield audio-pipeline outages.
+        from src.clients.higgsfield import HiggsfieldError
+
+        length_tiers: list[tuple[str, str]] = [
+            ("full", prompt),
+            ("shortened", _shorten_prompt(prompt, target=900)),
+            ("minimal", _shorten_prompt(prompt, target=350)),
+        ]
+        audio_tiers: list[tuple[str, dict[str, Any]]] = (
+            [("with-audio", dict(flags)), ("no-audio", _strip_audio_flag(flags))]
+            if audio_uuid
+            else [("no-audio", flags)]
         )
 
-        result = await cli.generate(
-            settings.cli_model_for(provider),
-            prompt=motion_prompt,
-            wait=True,
-            wait_timeout="20m",
-            **flags,
-        )
+        last_exc: Exception | None = None
+        result = None
+        for audio_label, audio_flags in audio_tiers:
+            for tier, attempt_prompt in length_tiers:
+                motion_prompt = (
+                    f"{attempt_prompt.rstrip('. ')}. {settings.motion_prompt_suffix}"
+                )
+                logger.info(
+                    f"[video_generator] {provider} clip {index} "
+                    f"{'(i2v)' if start_image_uuid else '(t2v)'} "
+                    f"audio={audio_label} prompt={tier} "
+                    f"chars={len(motion_prompt)} → {attempt_prompt[:80]}…"
+                )
+                try:
+                    result = await cli.generate(
+                        settings.cli_model_for(provider),
+                        prompt=motion_prompt,
+                        wait=True,
+                        wait_timeout="20m",
+                        **audio_flags,
+                    )
+                    break
+                except HiggsfieldError as exc:
+                    last_exc = exc
+                    msg = str(exc).lower()
+                    transient = any(
+                        s in msg
+                        for s in (
+                            "internal server error",
+                            "http 500",
+                            "http 422",
+                            "http 413",
+                            "prompt",
+                            "too long",
+                            "invalid",
+                            "audio",
+                        )
+                    )
+                    if not transient:
+                        raise
+                    logger.warning(
+                        f"[video_generator] clip {index} "
+                        f"audio={audio_label} tier={tier} failed: "
+                        f"{str(exc)[:160]} — trying next fallback"
+                    )
+            if result is not None:
+                break
+
+        if result is None:
+            assert last_exc is not None
+            raise last_exc
 
         video_url = extract_video_url(result)
         clip_path = clips_dir / f"clip_{index:02d}.mp4"
         await download_to_path(video_url, clip_path)
         logger.info(f"[video_generator] {provider} clip {index} saved → {clip_path}")
         return clip_path
+
+
+def _strip_audio_flag(flags: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of the flags dict without the `audio` key. Used as a
+    last-resort retry when Higgsfield's lip-sync chain is misbehaving (HTTP
+    500 on requests that include --audio); the assembler will mux the voice
+    on top of the silent clip instead.
+    """
+    f = dict(flags)
+    f.pop("audio", None)
+    return f
+
+
+def _shorten_prompt(prompt: str, *, target: int) -> str:
+    """Trim a prompt to roughly `target` characters by:
+    1. Keeping the first 1-2 sentences (the SHOT description — must be kept).
+    2. Dropping repeated paragraphs (a common Director/style-brief bug).
+    3. Hard-clamping the result.
+
+    We err on the side of preserving the start of the prompt because Higgsfield
+    parses front-to-back: the action/composition lives there.
+    """
+    p = (prompt or "").strip()
+    if len(p) <= target:
+        return p
+
+    # 1) deduplicate consecutive sentences — when style_brief was appended
+    # twice, the same long sentence repeats verbatim.
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for sent in p.replace("\n", " ").split(". "):
+        key = sent.strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            deduped.append(sent.strip())
+    p = ". ".join(deduped)
+    if not p.endswith("."):
+        p += "."
+    if len(p) <= target:
+        return p
+
+    # 2) keep the first 1-3 sentences only, plus a tail safety clamp.
+    sentences = [s for s in p.split(". ") if s.strip()]
+    kept: list[str] = []
+    total = 0
+    for s in sentences:
+        if total + len(s) > target:
+            break
+        kept.append(s)
+        total += len(s) + 2
+    out = ". ".join(kept).strip()
+    if not out:
+        out = p[:target]
+    if not out.endswith("."):
+        out += "."
+    return out[:target]
 
 
 VEO_ALLOWED_DURATIONS: frozenset[int] = frozenset({4, 6, 8})
