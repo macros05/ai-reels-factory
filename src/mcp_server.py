@@ -756,6 +756,154 @@ async def providers_info() -> dict[str, Any]:
     }
 
 
+def _build_http_app():
+    """Return the FastMCP Streamable HTTP ASGI app, wrapped with hard auth.
+
+    Mounted at `/mcp/` inside the main FastAPI app so Claude.ai / Claude
+    Desktop can connect over HTTPS at `https://<host>/mcp/` with:
+        Authorization: Bearer $MCP_TOKEN
+
+    Three layers of defense (in order):
+    1. Optional IP whitelist (env `MCP_ALLOWED_IPS`, comma-separated; empty
+       means allow all — controlled at the network edge).
+    2. Mandatory Bearer token check against `MCP_TOKEN`.
+    3. Sliding-window rate limit per IP (default 30 req / 60 s), so a leaked
+       token can't burn the credit budget faster than the operator can rotate
+       it.
+    """
+    # When mounted at "/mcp" the inner Starlette sees requests at "/" — so
+    # the MCP endpoint should be the root.
+    mcp.settings.streamable_http_path = "/"
+    mcp.settings.stateless_http = True
+    mcp.settings.json_response = True
+
+    # FastMCP enables anti-DNS-rebinding by default (whitelist host:port). When
+    # we run behind nginx + Cloudflare the public Host doesn't fit that scheme,
+    # so we either whitelist explicit hosts via MCP_PUBLIC_HOST or disable the
+    # check entirely (safe because the Bearer token gate already authenticates
+    # every request).
+    extra_hosts = [
+        h.strip()
+        for h in os.environ.get("MCP_PUBLIC_HOST", "").split(",")
+        if h.strip()
+    ]
+    if extra_hosts:
+        base_hosts = list(mcp.settings.transport_security.allowed_hosts)
+        mcp.settings.transport_security.allowed_hosts = base_hosts + extra_hosts
+        # Auto-derive allowed origins from the listed hosts.
+        derived = []
+        for h in extra_hosts:
+            derived.extend([f"https://{h}", f"http://{h}"])
+        base_origins = list(mcp.settings.transport_security.allowed_origins)
+        mcp.settings.transport_security.allowed_origins = base_origins + derived
+    else:
+        # No public host configured → just turn off the rebinding check.
+        mcp.settings.transport_security.enable_dns_rebinding_protection = False
+
+    inner = mcp.streamable_http_app()
+
+    expected_token = os.environ.get("MCP_TOKEN", "").strip()
+    allowed_ips = {
+        ip.strip()
+        for ip in os.environ.get("MCP_ALLOWED_IPS", "").split(",")
+        if ip.strip()
+    }
+    rate_max = int(os.environ.get("MCP_RATE_LIMIT_PER_MINUTE", "30"))
+    rate_window = 60.0
+
+    # Per-IP sliding window: ip → [timestamps...]
+    import collections
+    import time as _time
+
+    history: dict[str, collections.deque[float]] = collections.defaultdict(
+        lambda: collections.deque(maxlen=rate_max + 8)
+    )
+
+    async def _deny(send, status: int, body: bytes, extra_headers=()) -> None:
+        await send(
+            {
+                "type": "http.response.start",
+                "status": status,
+                "headers": [(b"content-type", b"application/json"), *extra_headers],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
+
+    async def asgi(scope, receive, send):  # noqa: D401
+        if scope["type"] != "http":
+            await inner(scope, receive, send)
+            return
+
+        # Pull headers + client IP (honour X-Forwarded-For from nginx).
+        client_ip = ""
+        auth_header = ""
+        for name, value in scope.get("headers", []):
+            ln = name.lower()
+            if ln == b"x-forwarded-for":
+                client_ip = (
+                    value.decode("latin-1", errors="ignore").split(",")[0].strip()
+                )
+            elif ln == b"authorization":
+                auth_header = value.decode("latin-1", errors="ignore")
+        if not client_ip:
+            client = scope.get("client") or ("", 0)
+            client_ip = client[0] if client else ""
+
+        # 1) IP whitelist (skipped when env unset).
+        if allowed_ips and client_ip not in allowed_ips:
+            await _deny(
+                send,
+                403,
+                b'{"detail":"client IP not allowed for MCP"}',
+            )
+            return
+
+        # 2) Bearer token.
+        if not expected_token:
+            await _deny(
+                send,
+                503,
+                b'{"detail":"MCP_TOKEN not configured on the server"}',
+            )
+            return
+        ok = (
+            auth_header.startswith("Bearer ")
+            and auth_header[7:].strip() == expected_token
+        )
+        if not ok:
+            await _deny(
+                send,
+                401,
+                b'{"detail":"missing or invalid MCP token"}',
+                extra_headers=((b"www-authenticate", b"Bearer"),),
+            )
+            return
+
+        # 3) Rate limit per IP (sliding window).
+        now = _time.monotonic()
+        bucket = history[client_ip or "unknown"]
+        while bucket and now - bucket[0] > rate_window:
+            bucket.popleft()
+        if len(bucket) >= rate_max:
+            retry = max(1, int(rate_window - (now - bucket[0])))
+            await _deny(
+                send,
+                429,
+                b'{"detail":"too many MCP requests; slow down"}',
+                extra_headers=((b"retry-after", str(retry).encode()),),
+            )
+            return
+        bucket.append(now)
+
+        await inner(scope, receive, send)
+
+    return asgi
+
+
+# Public ASGI app the FastAPI main.py mounts at "/mcp"
+mcp_http_app = _build_http_app()
+
+
 def main() -> None:
     """Entry point for `reels-mcp`. Runs stdio MCP transport."""
     # Suppress loguru chatter on stderr because Claude Desktop reads stderr

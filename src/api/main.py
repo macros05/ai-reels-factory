@@ -81,12 +81,25 @@ _LOCK = asyncio.Lock()
 async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Reattach Soul-ID training pollers on startup so the UI doesn't see
     a `training` character get stuck forever after a server restart.
+
+    Also drives the FastMCP session manager's task group so the mounted
+    Streamable HTTP transport at /mcp can accept requests.
     """
     try:
         await resume_pending_trainings()
     except Exception:
         logger.exception("[startup] failed to resume character pollers")
-    yield
+
+    # Bring up the MCP session manager (optional — if mcp_server is unavailable
+    # the rest of the API stays up).
+    try:
+        from src.mcp_server import mcp as _mcp  # noqa: WPS433
+        async with _mcp.session_manager.run():
+            logger.info("[startup] MCP session manager running")
+            yield
+    except Exception as exc:
+        logger.warning(f"[startup] MCP session manager not running: {exc}")
+        yield
 
 
 limiter = Limiter(key_func=get_remote_address)
@@ -927,6 +940,37 @@ async def api_not_found(rest: str) -> Any:
     """Catch-all for unmatched /api/* paths so they 404 as JSON instead of
     falling through to the SPA static mount and returning index.html."""
     raise HTTPException(status_code=404, detail=f"unknown api route: /api/{rest}")
+
+
+# ---------------------------------------------------------------------------
+# MCP server over Streamable HTTP — Bearer-auth gated by MCP_TOKEN env var.
+# Mount BEFORE the SPA so /mcp doesn't fall through to index.html.
+# Claude.ai / Claude Desktop point at https://<host>/mcp
+# ---------------------------------------------------------------------------
+
+try:
+    from src.mcp_server import mcp_http_app  # noqa: WPS433
+    app.mount("/mcp", mcp_http_app, name="mcp")
+
+    # Tolerant redirect: /mcp → /mcp/ so MCP clients (Claude.ai connector,
+    # mcp inspect, …) work whether they include the trailing slash or not.
+    from fastapi import Request as _Req  # noqa: WPS433
+    from fastapi.responses import RedirectResponse  # noqa: WPS433
+
+    @app.api_route(
+        "/mcp",
+        methods=["GET", "POST", "DELETE"],
+        include_in_schema=False,
+    )
+    async def _mcp_redirect(request: _Req) -> Any:
+        q = request.url.query
+        target = "/mcp/" + (f"?{q}" if q else "")
+        # 307 preserves method + body
+        return RedirectResponse(target, status_code=307)
+
+    logger.info("MCP Streamable HTTP transport mounted at /mcp/")
+except Exception as exc:  # pragma: no cover - non-fatal so the rest of the API stays up
+    logger.warning(f"MCP mount skipped: {exc}")
 
 
 # ---------------------------------------------------------------------------

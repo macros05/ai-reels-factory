@@ -155,17 +155,69 @@ function McpSection() {
       <Block title="¿Qué es el MCP server?">
         <p>
           <code>reels-mcp</code> expone el pipeline al Model Context Protocol.
-          Cualquier cliente compatible (Claude Desktop, Claude Code, Cursor)
-          puede orquestar reels end-to-end sin pasar por HTTP: pedirle a Claude
-          "crea un reel sobre X, edita el Shot 3 para que sea handheld, regenera
-          ese clip" funciona como una conversación normal.
+          Cualquier cliente compatible (Claude Desktop, Claude.ai web, Claude
+          Code, Cursor) puede orquestar reels end-to-end sin pasar por HTTP:
+          pedirle a Claude "crea un reel sobre X, edita el Shot 3 para que sea
+          handheld, regenera ese clip" funciona como una conversación normal.
+        </p>
+        <p>
+          Hay <strong>dos modos de conectar</strong>: <em>stdio</em> (proceso
+          local, solo si tienes el repo clonado) o <em>Streamable HTTP</em>{" "}
+          (URL pública, funciona desde Claude.ai web).
         </p>
       </Block>
 
-      <Block title="Claude Desktop (macOS / Windows)">
+      <Block title="Modo A · Claude.ai web (conector HTTP)">
         <p>
-          Edita <code>~/Library/Application Support/Claude/claude_desktop_config.json</code>{" "}
-          (macOS) o <code>%APPDATA%\Claude\claude_desktop_config.json</code> (Windows):
+          En claude.ai → <strong>Configuración</strong> →{" "}
+          <strong>Conectores</strong> → <strong>Añadir conector</strong> →
+          rellena los dos campos:
+        </p>
+        <ul className="ml-5 list-disc space-y-1.5 marker:text-violet-400">
+          <li>
+            <strong>URL del servidor</strong>:{" "}
+            <code>https://reels.marcosmorales.dev/mcp/</code> (con la barra
+            final)
+          </li>
+          <li>
+            <strong>Cabecera de autenticación</strong>:{" "}
+            <code>Authorization: Bearer &lt;MCP_TOKEN&gt;</code>
+            <br />
+            (la clave vive en <code>/opt/ai-reels-factory/.env</code> como{" "}
+            <code>MCP_TOKEN=…</code>)
+          </li>
+        </ul>
+        <p>
+          Tres capas protegen el endpoint para que nadie te queme créditos:
+        </p>
+        <ol className="ml-5 list-decimal space-y-1.5 marker:text-violet-400">
+          <li>
+            <strong>Bearer token</strong> de 32 bytes aleatorios — sin él la
+            request se rechaza con 401.
+          </li>
+          <li>
+            <strong>Rate limit</strong> por IP: 30 peticiones/minuto. Se puede
+            ajustar con <code>MCP_RATE_LIMIT_PER_MINUTE</code>.
+          </li>
+          <li>
+            <strong>Whitelist opcional de IPs</strong> con{" "}
+            <code>MCP_ALLOWED_IPS=1.2.3.4,5.6.7.8</code> en{" "}
+            <code>.env</code>. Si está vacío, cualquier IP con el token
+            entra.
+          </li>
+        </ol>
+        <p className="text-[12.5px] text-zinc-500">
+          Rotar la clave: edita <code>MCP_TOKEN</code> en <code>.env</code> y{" "}
+          <code>systemctl restart reels-factory</code>.
+        </p>
+      </Block>
+
+      <Block title="Modo B · Claude Desktop (proceso local stdio)">
+        <p>
+          Solo si el repo está clonado en la máquina donde corre Claude
+          Desktop. Edita <code>~/Library/Application Support/Claude/claude_desktop_config.json</code>{" "}
+          (macOS) o <code>%APPDATA%\Claude\claude_desktop_config.json</code>{" "}
+          (Windows):
         </p>
         <CodeBlock
           lang="json"
@@ -176,10 +228,7 @@ function McpSection() {
       "args": [
         "--directory", "/opt/ai-reels-factory",
         "run", "reels-mcp"
-      ],
-      "env": {
-        "APP_PASSWORD": "tu_password_aqui"
-      }
+      ]
     }
   }
 }`}
@@ -190,23 +239,17 @@ function McpSection() {
         </p>
       </Block>
 
-      <Block title="Claude Code (terminal)">
-        <p>Una sola línea:</p>
+      <Block title="Modo C · Claude Code (terminal)">
+        <p>HTTP remoto (recomendado):</p>
+        <CodeBlock
+          lang="bash"
+          code={`claude mcp add --transport http reels-factory https://reels.marcosmorales.dev/mcp/ \\
+  --header "Authorization: Bearer $MCP_TOKEN"`}
+        />
+        <p>O stdio local:</p>
         <CodeBlock
           lang="bash"
           code={`claude mcp add reels-factory uv --directory /opt/ai-reels-factory run reels-mcp`}
-        />
-        <p>O en <code>~/.claude/mcp.json</code>:</p>
-        <CodeBlock
-          lang="json"
-          code={`{
-  "mcpServers": {
-    "reels-factory": {
-      "command": "uv",
-      "args": ["--directory", "/opt/ai-reels-factory", "run", "reels-mcp"]
-    }
-  }
-}`}
         />
       </Block>
 
