@@ -858,7 +858,13 @@ def _build_http_app():
             )
             return
 
-        # 2) Bearer token.
+        # 2) Token auth — accepts either header OR URL path segment.
+        # Path-token mode (used by Claude.ai connector, which can't set
+        # custom Authorization headers): URL is
+        #     https://<host>/mcp/<MCP_TOKEN>/
+        # The asgi sees scope.path == "/<MCP_TOKEN>/..." (relative to the
+        # /mcp mount). We strip the token from the path so the inner MCP
+        # app sees just "/...".
         if not expected_token:
             await _deny(
                 send,
@@ -866,11 +872,32 @@ def _build_http_app():
                 b'{"detail":"MCP_TOKEN not configured on the server"}',
             )
             return
-        ok = (
+
+        # When mounted at /mcp, Starlette is supposed to strip the prefix,
+        # but FastAPI's catch-all sometimes leaves it intact. Handle both
+        # cases by always stripping a leading `/mcp/` if present.
+        raw_path = scope.get("path", "") or "/"
+        root = scope.get("root_path", "") or ""
+        path = raw_path
+        if root and path.startswith(root):
+            path = path[len(root):] or "/"
+        elif path.startswith("/mcp/"):
+            path = path[len("/mcp"):] or "/"
+        parts = path.lstrip("/").split("/", 1)
+        path_token = parts[0] if parts and parts[0] else ""
+        path_token_ok = bool(path_token) and path_token == expected_token
+
+        header_token_ok = (
             auth_header.startswith("Bearer ")
             and auth_header[7:].strip() == expected_token
         )
-        if not ok:
+
+        if path_token_ok:
+            new_path = "/" + (parts[1] if len(parts) > 1 else "")
+            scope = dict(scope)
+            scope["path"] = new_path
+            scope["raw_path"] = new_path.encode("utf-8")
+        elif not header_token_ok:
             await _deny(
                 send,
                 401,

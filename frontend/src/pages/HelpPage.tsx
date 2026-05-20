@@ -169,22 +169,33 @@ function McpSection() {
 
       <Block title="Modo A · Claude.ai web (conector HTTP)">
         <p>
-          En claude.ai → <strong>Configuración</strong> →{" "}
-          <strong>Conectores</strong> → <strong>Añadir conector</strong> →
-          rellena los dos campos:
+          El conector personalizado de Claude.ai <strong>no permite añadir
+          cabeceras custom</strong> (solo OAuth, que no implementamos). Por
+          eso aceptamos el token también <strong>embebido en la URL</strong>,
+          como path-segment. Igual de seguro porque HTTPS encripta toda la
+          ruta en tránsito.
+        </p>
+        <p>
+          En <code>claude.ai</code> → <strong>Configuración</strong> →{" "}
+          <strong>Conectores</strong> → <strong>Añadir conector personalizado</strong>:
         </p>
         <ul className="ml-5 list-disc space-y-1.5 marker:text-violet-400">
           <li>
-            <strong>URL del servidor</strong>:{" "}
-            <code>https://reels.marcosmorales.dev/mcp/</code> (con la barra
-            final)
+            <strong>Nombre</strong>: el que quieras (p. ej.{" "}
+            <em>CreacionVideoMarcos</em>)
           </li>
           <li>
-            <strong>Cabecera de autenticación</strong>:{" "}
-            <code>Authorization: Bearer &lt;MCP_TOKEN&gt;</code>
+            <strong>URL del servidor</strong>:{" "}
+            <code>
+              https://reels.marcosmorales.dev/mcp/&lt;MCP_TOKEN&gt;/
+            </code>
             <br />
-            (la clave vive en <code>/opt/ai-reels-factory/.env</code> como{" "}
-            <code>MCP_TOKEN=…</code>)
+            La barra final es importante. Sustituye <code>&lt;MCP_TOKEN&gt;</code>{" "}
+            por el valor que tienes en{" "}
+            <code>/opt/ai-reels-factory/.env</code>.
+          </li>
+          <li>
+            <strong>OAuth Client ID / Secret</strong>: déjalos en blanco.
           </li>
         </ul>
         <p>
@@ -192,23 +203,25 @@ function McpSection() {
         </p>
         <ol className="ml-5 list-decimal space-y-1.5 marker:text-violet-400">
           <li>
-            <strong>Bearer token</strong> de 32 bytes aleatorios — sin él la
-            request se rechaza con 401.
+            <strong>Token MCP</strong> de 32 bytes aleatorios — sin él la
+            request se rechaza con 401 (acepta también como header{" "}
+            <code>Authorization: Bearer …</code>).
           </li>
           <li>
-            <strong>Rate limit</strong> por IP: 30 peticiones/minuto. Se puede
-            ajustar con <code>MCP_RATE_LIMIT_PER_MINUTE</code>.
+            <strong>Whitelist de IPs</strong> con{" "}
+            <code>MCP_ALLOWED_IPS</code> en <code>.env</code> (recuerda que
+            tu IP pública vista por el server es la de tu router; si tu ISP
+            te asigna IP dinámica tendrás que actualizarla).
           </li>
           <li>
-            <strong>Whitelist opcional de IPs</strong> con{" "}
-            <code>MCP_ALLOWED_IPS=1.2.3.4,5.6.7.8</code> en{" "}
-            <code>.env</code>. Si está vacío, cualquier IP con el token
-            entra.
+            <strong>Rate limit</strong> por IP: 30 peticiones/minuto, ajustable
+            con <code>MCP_RATE_LIMIT_PER_MINUTE</code>.
           </li>
         </ol>
         <p className="text-[12.5px] text-zinc-500">
           Rotar la clave: edita <code>MCP_TOKEN</code> en <code>.env</code> y{" "}
-          <code>systemctl restart reels-factory</code>.
+          <code>systemctl restart reels-factory</code>. La URL con el token
+          viejo deja de funcionar inmediatamente.
         </p>
       </Block>
 
