@@ -84,10 +84,17 @@ class VideoGeneratorStep:
         plan: ShotPlan | None = context.get("shot_plan")
         # Prefer the director's final_prompt per shot when available; fall
         # back to the script's visual_prompts so older runs still work.
+        # The director already folds style_brief into each final_prompt (see
+        # DirectorStep.docstring), so when we're using the plan we must NOT
+        # append style_brief again — doing so duplicates the entire style
+        # paragraph in the prompt and blows past Kling's ~512-token limit
+        # (the resulting HTTP 500 was the symptom).
+        used_director_prompts = False
         if plan and plan.shots:
             prompts = [
                 (s.final_prompt or "").strip() for s in plan.shots[:num_clips]
             ]
+            used_director_prompts = True
             # Backfill any empty director prompt from the script (defensive
             # for runs where the director soft-failed on a single shot).
             for i, p in enumerate(prompts):
@@ -98,13 +105,21 @@ class VideoGeneratorStep:
                         else script.persona_description
                     )
                     prompts[i] = backup
+                    used_director_prompts = False  # backfilled prompt lacks style
         else:
             prompts = list(script.visual_prompts[:num_clips])
         if len(prompts) < num_clips:
             fallback = prompts[-1] if prompts else script.persona_description
             prompts.extend([fallback] * (num_clips - len(prompts)))
-        if style_brief:
+        if style_brief and not used_director_prompts:
             prompts = [f"{p.rstrip('. ')}. {style_brief}" for p in prompts]
+        # Belt-and-braces: clamp any prompt that somehow grew past Kling's
+        # safe size so a stray long prompt can't 500 the whole pipeline.
+        MAX_PROMPT_CHARS = 2000
+        prompts = [
+            (p if len(p) <= MAX_PROMPT_CHARS else p[:MAX_PROMPT_CHARS])
+            for p in prompts
+        ]
 
         cli = self._get_cli()
 
