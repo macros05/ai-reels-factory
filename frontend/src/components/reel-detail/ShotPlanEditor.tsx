@@ -432,9 +432,16 @@ export function ShotPlanEditor({
         </div>
       </div>
 
-      {/* Persona lock + style brief — read-only on a separate strip */}
-      {(plan.persona_lock || plan.style_brief) && (
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+      {/* Persona lock + style brief + camera directive — read-only strips */}
+      {(plan.persona_lock || plan.style_brief || plan.camera_directive) && (
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+          {plan.camera_directive && (
+            <InfoStrip
+              label="Camera directive"
+              value={plan.camera_directive}
+              tone="violet"
+            />
+          )}
           {plan.persona_lock && (
             <InfoStrip label="Persona lock" value={plan.persona_lock} />
           )}
@@ -470,10 +477,24 @@ function Field({
   );
 }
 
-function InfoStrip({ label, value }: { label: string; value: string }) {
+function InfoStrip({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: string;
+  tone?: "violet";
+}) {
+  const accent =
+    tone === "violet"
+      ? "border-violet-400/20 bg-violet-500/[0.06]"
+      : "border-white/[0.05] bg-white/[0.02]";
+  const labelColor =
+    tone === "violet" ? "text-violet-300" : "text-zinc-500";
   return (
-    <div className="rounded-xl border border-white/[0.05] bg-white/[0.02] px-4 py-3">
-      <div className="mono text-[10px] uppercase tracking-wider text-zinc-500">
+    <div className={`rounded-xl border px-4 py-3 ${accent}`}>
+      <div className={`mono text-[10px] uppercase tracking-wider ${labelColor}`}>
         {label}
       </div>
       <p className="mt-1 text-[12.5px] leading-relaxed text-zinc-300">{value}</p>

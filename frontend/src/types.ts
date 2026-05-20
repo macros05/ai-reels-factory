@@ -77,6 +77,7 @@ export interface ShotPlan {
   logline: string;
   style_brief: string;
   persona_lock: string;
+  camera_directive: string;
   shots: Shot[];
 }
 

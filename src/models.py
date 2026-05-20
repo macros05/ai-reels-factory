@@ -102,6 +102,11 @@ class ShotPlan(BaseModel):
     logline: str = ""
     style_brief: str = ""
     persona_lock: str = ""
+    # Top-level camera language the director picked for the whole reel
+    # (e.g. "handheld, intimate, slow drifts" / "locked-off + dolly,
+    # cinematic, formal"). Surfaced so all shots stay coherent and the UI
+    # can show what register Claude chose.
+    camera_directive: str = ""
     shots: list[Shot] = Field(default_factory=list)
 
 

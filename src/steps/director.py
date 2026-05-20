@@ -45,6 +45,15 @@ markdown, sin ```json.
 
 Reglas duras:
 
+0. COHERENCIA ENTRE CLIPS — antes de escribir nada, decide UN lenguaje de
+   cámara base coherente para todo el reel (handheld, locked-off + dolly,
+   orbit lento, etc.) y úsalo en TODOS los shots con variaciones SUTILES
+   por shot. La pieza tiene que verse como un solo rodaje, no como 5
+   estilos distintos pegados. Variar el `camera_move` está permitido pero
+   debe sentirse parte del mismo lenguaje (p.ej. todo handheld pero con
+   distancias y direcciones distintas). El campo top-level
+   `camera_directive` recoge esa decisión en 1-2 frases.
+
 1. Generas EXACTAMENTE {num_shots} shots, uno por cada clip de
    {clip_seconds} segundos. Índices 0…{last_index}.
 
@@ -53,9 +62,9 @@ Reglas duras:
    - shot_size: uno de extreme_close_up | close_up | medium_close_up |
      medium | medium_wide | wide | extreme_wide
    - camera_move: descripción cinematográfica concreta en inglés
-     (e.g. "slow handheld push-in, 4° horizon shake", "static dolly track
-     left, follow at hip height", "smooth crane down from eye-level to
-     waist", "subtle parallax orbit clockwise"). NUNCA "static" o
+     coherente con `camera_directive` (e.g. "slow handheld push-in, 4°
+     horizon shake", "handheld lateral drift right at waist height",
+     "handheld subtle pull-back from CU to MS"). NUNCA "static" o
      "no movement" — siempre algo de vida.
    - lens_mm: 18 | 24 | 28 | 35 | 50 | 85 (entero)
    - aperture: e.g. "f/1.8", "f/2.8"
@@ -102,6 +111,7 @@ Esquema JSON exacto:
   "logline": str,
   "style_brief": str,
   "persona_lock": str,
+  "camera_directive": str,
   "shots": [
     {{
       "index": int,
@@ -279,8 +289,16 @@ class DirectorStep:
                 logline=str(data.get("logline") or "").strip(),
                 style_brief=str(data.get("style_brief") or style_brief).strip(),
                 persona_lock=str(data.get("persona_lock") or script.persona_description).strip(),
+                camera_directive=str(data.get("camera_directive") or "").strip(),
                 shots=shots,
             )
+
+            # ── self-review pass ──
+            # Claude audits its own plan for inconsistencies (camera
+            # drifting, persona breaking, mismatched mood) and emits a
+            # refined version. Capped at one extra call so cost stays
+            # bounded. Soft-fails to the original plan on any error.
+            plan = await self._self_review(plan)
         except Exception as exc:
             # Don't kill the run — fall back to a synthesized plan from the
             # script's visual_prompts so the video step still has something
@@ -297,10 +315,83 @@ class DirectorStep:
             )
 
         logger.info(
-            f"[director] plan ready — title={plan.title!r} shots={len(plan.shots)}"
+            f"[director] plan ready — title={plan.title!r} shots={len(plan.shots)} "
+            f"camera={plan.camera_directive!r}"
         )
         context["shot_plan"] = plan
         return context
+
+    async def _self_review(self, plan: ShotPlan) -> ShotPlan:
+        """Second pass: Claude audits the plan it just wrote.
+
+        We give it the plan plus an explicit checklist (persona consistency,
+        camera language coherence, prompt completeness) and ask for a
+        revised JSON. The agent self-edits before the video step burns
+        credits. One extra Claude call is dirt cheap compared to a wasted
+        Higgsfield render.
+        """
+        try:
+            client = self._get_client()
+            review_system = (
+                "Eres director de cine senior. Te paso un PLAN DE RODAJE en "
+                "JSON que tú mismo acabas de escribir. Tu trabajo es auditarlo "
+                "y devolver una VERSIÓN REVISADA en el MISMO esquema, sin "
+                "texto ni markdown, sólo JSON.\n\n"
+                "Checklist obligatorio:\n"
+                "1. PERSONA: cada shot empieza con la misma persona descrita "
+                "   en persona_lock — corrige si alguno deriva.\n"
+                "2. CÁMARA: todos los camera_move pertenecen al mismo "
+                "   lenguaje declarado en camera_directive. Variaciones "
+                "   permitidas (distancia, dirección), pero NO cambios "
+                "   radicales de registro (no mezclar handheld con orbit "
+                "   cinematográfico salvo que camera_directive lo permita "
+                "   explícitamente). Reescribe los que se salgan.\n"
+                "3. PALETA: color_palette consistente en todos los shots, "
+                "   con variaciones por escena pero no contradictorias.\n"
+                "4. PROMPT FINAL: cada shot.final_prompt incluye persona + "
+                "   shot_size + camera_move + lighting + beats resumidos + "
+                "   color palette + cola técnica (hyperrealistic, 9:16, "
+                "   shot on Sony FX3, shallow DOF). Reescríbelo si falta.\n"
+                "5. CONTINUIDAD: si el wardrobe / props cambian entre shots, "
+                "   justifica con un cambio de escena explícito en location.\n"
+                "Si todo está bien, devuelve el plan tal cual. Si algo "
+                "necesita arreglo, devuelve la versión corregida."
+            )
+            message = await client.messages.create(
+                model=settings.anthropic_model,
+                max_tokens=4096,
+                system=review_system,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": f"PLAN ACTUAL:\n{plan.model_dump_json(indent=2)}",
+                    }
+                ],
+            )
+            raw = "".join(
+                b.text for b in message.content if getattr(b, "type", None) == "text"
+            ).strip()
+            if raw.startswith("```"):
+                raw = raw.strip("`")
+                if raw.lower().startswith("json"):
+                    raw = raw[4:].strip()
+            data = json.loads(raw)
+            revised = ShotPlan.model_validate(data)
+            # Reject revisions that drop or add shots — we want a refinement,
+            # not a re-plan. If the count doesn't match, keep the original.
+            if len(revised.shots) != len(plan.shots):
+                logger.warning(
+                    f"[director] self-review changed shot count "
+                    f"({len(plan.shots)} → {len(revised.shots)}); discarding"
+                )
+                return plan
+            logger.info("[director] self-review pass applied")
+            return revised
+        except Exception as exc:
+            logger.warning(
+                f"[director] self-review skipped ({type(exc).__name__}: {exc})"
+            )
+            return plan
 
 
 def _fallback_plan(
