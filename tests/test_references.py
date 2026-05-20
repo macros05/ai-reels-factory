@@ -104,6 +104,7 @@ def test_create_run_drains_pending_references(
         soul_id: str | None = None,
         voiceless: bool = False,
         use_keyframes: bool = False,
+        brief: Any = None,
     ) -> None:
         captured["topic"] = topic
         captured["run_id"] = run_id
@@ -149,6 +150,7 @@ def test_draft_run_sets_pause_after_script_generator(
         soul_id: str | None = None,
         voiceless: bool = False,
         use_keyframes: bool = False,
+        brief: Any = None,
     ) -> None:
         captured["pause_after"] = pause_after
 

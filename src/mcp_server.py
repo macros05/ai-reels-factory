@@ -43,6 +43,7 @@ from loguru import logger
 from src.config import VideoProvider, settings
 from src.models import (
     CreativeBrief,
+    Reference,
     RunResult,
     RunStatus,
     Shot,
@@ -386,6 +387,331 @@ async def wait_until_status(
                 "timed_out": True,
             }
         await asyncio.sleep(poll_seconds)
+
+
+@mcp.tool()
+async def update_script(
+    run_id: str,
+    hook: str | None = None,
+    body: str | None = None,
+    cta: str | None = None,
+    caption: str | None = None,
+    hashtags: list[str] | None = None,
+    persona_description: str | None = None,
+    visual_prompts: list[str] | None = None,
+    persona_gender: str | None = None,
+) -> dict[str, Any]:
+    """Patch the persisted script fields. Recomputes full_script when hook,
+    body or cta change. Useful from MCP when you want to tweak copy without
+    going through the UI.
+    """
+    r = _load_run(run_id)
+    if r is None:
+        return {"error": f"run {run_id!r} not found"}
+    if r.script is None:
+        return {"error": "run has no script yet"}
+    update: dict[str, Any] = {}
+    if hook is not None:
+        update["hook"] = hook
+    if body is not None:
+        update["body"] = body
+    if cta is not None:
+        update["cta"] = cta
+    if caption is not None:
+        update["caption"] = caption
+    if hashtags is not None:
+        update["hashtags"] = [h.lstrip("#") for h in hashtags]
+    if persona_description is not None:
+        update["persona_description"] = persona_description
+    if visual_prompts is not None:
+        update["visual_prompts"] = list(visual_prompts)
+    if persona_gender is not None:
+        if persona_gender not in {"female", "male"}:
+            return {"error": "persona_gender must be 'female' or 'male'"}
+        update["persona_gender"] = persona_gender
+    new_script = r.script.model_copy(update=update)
+    new_script.full_script = " ".join(
+        s for s in (new_script.hook, new_script.body, new_script.cta) if s.strip()
+    )
+    r.script = new_script
+    _persist(r)
+    return {"run_id": run_id, "script": new_script.model_dump()}
+
+
+@mcp.tool()
+async def confirm_run(run_id: str) -> dict[str, Any]:
+    """Resume a paused (script_ready) run with the currently persisted script.
+
+    Fires the rest of the pipeline (director → voice → video → assemble) in
+    the background. Use `wait_until_status` to block until it finishes.
+    """
+    r = _load_run(run_id)
+    if r is None:
+        return {"error": f"run {run_id!r} not found"}
+    if r.status != RunStatus.SCRIPT_READY:
+        return {
+            "error": f"cannot confirm — status is {r.status.value}, expected script_ready"
+        }
+    if r.script is None:
+        return {"error": "run has no script to confirm"}
+
+    edited = r.script
+    pipeline = Pipeline()
+
+    async def _go() -> None:
+        try:
+            await pipeline.resume(run_id=run_id, edited_script=edited)
+        except Exception:
+            logger.exception(f"[mcp] resume {run_id} crashed")
+
+    asyncio.create_task(_go())
+    return {"run_id": run_id, "status": "running"}
+
+
+@mcp.tool()
+async def regenerate_clip(
+    run_id: str,
+    clip_index: int,
+    extra_instruction: str | None = None,
+) -> dict[str, Any]:
+    """Re-render one clip without re-running the whole reel.
+
+    Reads the persisted ShotPlan, optionally appends `extra_instruction` to
+    the active shot's final_prompt, then calls Higgsfield only for that clip
+    and overwrites `clips/clip_XX.mp4`. The next call to `wait_until_status`
+    will see the run go back to RUNNING while the regen lasts.
+
+    Cheap path: skips voice, subtitle, director and assembler — only the
+    video step touches the network.
+    """
+    from src.clients.higgsfield import (
+        HiggsfieldCLI,
+        download_to_path,
+        extract_video_url,
+        get_higgsfield_cli,
+    )
+    from src.steps.video_generator import _build_clip_flags
+
+    r = _load_run(run_id)
+    if r is None:
+        return {"error": f"run {run_id!r} not found"}
+    if r.shot_plan is None or not r.shot_plan.shots:
+        return {"error": "run has no shot_plan; regenerate from scratch with create_reel"}
+    if not (0 <= clip_index < len(r.shot_plan.shots)):
+        return {"error": f"clip_index {clip_index} out of range"}
+
+    provider: VideoProvider = (r.provider or settings.video_provider)  # type: ignore[assignment]
+    duration = settings.clip_duration_for(provider)
+    shot = r.shot_plan.shots[clip_index]
+    prompt = shot.final_prompt or ""
+    if extra_instruction:
+        prompt = f"{prompt.rstrip('. ')}. {extra_instruction.strip().rstrip('. ')}"
+    if r.shot_plan.style_brief:
+        prompt = f"{prompt.rstrip('. ')}. {r.shot_plan.style_brief}"
+    prompt = f"{prompt.rstrip('. ')}. {settings.motion_prompt_suffix}"
+
+    cli: HiggsfieldCLI = get_higgsfield_cli()
+    flags = _build_clip_flags(
+        provider=provider,
+        duration=duration,
+        start_image_uuid=None,
+        audio_uuid=None,
+    )
+    logger.info(f"[mcp] regenerate clip {clip_index} for {run_id} via {provider}")
+    result = await cli.generate(
+        settings.cli_model_for(provider),
+        prompt=prompt,
+        wait=True,
+        wait_timeout="20m",
+        **flags,
+    )
+    url = extract_video_url(result)
+    clips_dir = (settings.output_dir / run_id / "clips")
+    clips_dir.mkdir(parents=True, exist_ok=True)
+    clip_path = clips_dir / f"clip_{clip_index:02d}.mp4"
+    await download_to_path(url, clip_path)
+    return {
+        "run_id": run_id,
+        "clip_index": clip_index,
+        "path": str(clip_path.resolve()),
+        "bytes": clip_path.stat().st_size if clip_path.exists() else None,
+    }
+
+
+@mcp.tool()
+async def get_brief(run_id: str) -> dict[str, Any]:
+    """Read the structured creative brief that was attached to the run."""
+    r = _load_run(run_id)
+    if r is None:
+        return {"error": f"run {run_id!r} not found"}
+    return {"run_id": run_id, "brief": r.brief.model_dump() if r.brief else None}
+
+
+@mcp.tool()
+async def set_brief(
+    run_id: str,
+    audience: str | None = None,
+    tone: list[str] | None = None,
+    mood: list[str] | None = None,
+    visual_vibe: list[str] | None = None,
+    palette: str | None = None,
+    cta_goal: str | None = None,
+    extra_notes: str | None = None,
+) -> dict[str, Any]:
+    """Patch the persisted brief. Only the fields you pass are overwritten.
+
+    Doesn't re-run anything — but the next director call (e.g. after
+    `regenerate_clip` or a fresh resume) will read the updated brief.
+    """
+    r = _load_run(run_id)
+    if r is None:
+        return {"error": f"run {run_id!r} not found"}
+    current = (
+        r.brief.model_dump()
+        if r.brief
+        else {
+            "topic": r.topic,
+            "tone": [],
+            "mood": [],
+            "visual_vibe": [],
+        }
+    )
+    if audience is not None:
+        current["audience"] = audience
+    if tone is not None:
+        current["tone"] = list(tone)
+    if mood is not None:
+        current["mood"] = list(mood)
+    if visual_vibe is not None:
+        current["visual_vibe"] = list(visual_vibe)
+    if palette is not None:
+        current["palette"] = palette
+    if cta_goal is not None:
+        current["cta_goal"] = cta_goal
+    if extra_notes is not None:
+        current["extra_notes"] = extra_notes
+    r.brief = CreativeBrief.model_validate(current)
+    _persist(r)
+    return {"run_id": run_id, "brief": r.brief.model_dump()}
+
+
+@mcp.tool()
+async def add_reference(
+    run_id: str,
+    kind: str,
+    path: str,
+    source_url: str | None = None,
+) -> dict[str, Any]:
+    """Attach a local file as a reference to a run.
+
+    kind ∈ {persona, style, script, voice, music}. `path` must point to a
+    file the server can read; we copy it under output/_uploads/{run_id}/
+    so the pipeline finds it later.
+    """
+    valid = {"persona", "style", "script", "voice", "music"}
+    if kind not in valid:
+        return {"error": f"kind must be one of {sorted(valid)}"}
+    src = Path(path).expanduser().resolve()
+    if not src.exists() or not src.is_file():
+        return {"error": f"file not found: {src}"}
+
+    r = _load_run(run_id)
+    if r is None:
+        return {"error": f"run {run_id!r} not found"}
+
+    dest_dir = (settings.references_dir / run_id).resolve()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    seq = len(list(dest_dir.glob(f"{kind}_*")))
+    dest = dest_dir / f"{kind}_{seq:02d}{src.suffix}"
+    dest.write_bytes(src.read_bytes())
+
+    mime = _guess_mime(dest.suffix.lower())
+    ref = Reference(
+        kind=kind,  # type: ignore[arg-type]
+        path=dest,
+        source_url=source_url,
+        mime=mime,
+        bytes=dest.stat().st_size,
+    )
+    r.references.append(ref)
+    _persist(r)
+    return {"run_id": run_id, "reference": ref.model_dump(mode="json")}
+
+
+@mcp.tool()
+async def list_references(run_id: str) -> dict[str, Any]:
+    """List all references attached to a run."""
+    r = _load_run(run_id)
+    if r is None:
+        return {"error": f"run {run_id!r} not found"}
+    return {
+        "run_id": run_id,
+        "references": [ref.model_dump(mode="json") for ref in r.references],
+    }
+
+
+@mcp.tool()
+async def reassemble(run_id: str) -> dict[str, Any]:
+    """Re-run only the final assembler step on existing clips.
+
+    Useful after `regenerate_clip` so the final video.mp4 picks up the
+    freshly regenerated clip(s). Reuses the persisted script + audio + subs
+    so no extra credit is burned.
+    """
+    from src.steps.assembler import AssemblerStep
+    from src.steps.subtitle_generator import SubtitleGeneratorStep
+    from src.models import SubtitleOutput, SubtitleSegment, VoiceOutput
+
+    r = _load_run(run_id)
+    if r is None:
+        return {"error": f"run {run_id!r} not found"}
+    if r.script is None:
+        return {"error": "run has no script yet"}
+
+    output_dir = settings.output_dir / run_id
+    clips_dir = output_dir / "clips"
+    if not clips_dir.exists():
+        return {"error": "no clips/ directory — has the video step ever run?"}
+    clip_paths = sorted(clips_dir.glob("clip_*.mp4"))
+    if not clip_paths:
+        return {"error": "no clip_XX.mp4 files in clips/"}
+
+    voice: VoiceOutput | None = None
+    audio_path = output_dir / "audio.mp3"
+    if audio_path.exists():
+        voice = VoiceOutput(audio_path=audio_path, duration_seconds=0.0)
+
+    context: dict[str, Any] = {
+        "script": r.script,
+        "output_dir": output_dir,
+        "video_clips": clip_paths,
+        "video_provider": r.provider,
+        "references": r.references,
+        "voice": voice,
+    }
+    await AssemblerStep().run(context)
+    final = output_dir / "video.mp4"
+    r.final_video_path = final
+    _persist(r)
+    return {"run_id": run_id, "final_video_path": str(final.resolve()), "exists": final.exists()}
+
+
+def _guess_mime(suffix: str) -> str:
+    return {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+        ".mp4": "video/mp4",
+        ".mov": "video/quicktime",
+        ".mp3": "audio/mpeg",
+        ".wav": "audio/wav",
+        ".aac": "audio/aac",
+        ".m4a": "audio/mp4",
+        ".flac": "audio/flac",
+        ".txt": "text/plain",
+        ".json": "application/json",
+    }.get(suffix, "application/octet-stream")
 
 
 @mcp.tool()

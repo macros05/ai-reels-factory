@@ -1,5 +1,6 @@
 import type {
   Character,
+  CreativeBrief,
   HiggsfieldStatus,
   LoginResponse,
   ProvidersResponse,
@@ -8,6 +9,8 @@ import type {
   RunDetail,
   RunSummary,
   ScriptOutput,
+  Shot,
+  ShotPlan,
 } from "@/types";
 import { clearToken, getToken } from "./auth";
 
@@ -73,6 +76,9 @@ export const api = {
     draft?: boolean;
     runId?: string;
     soulId?: string | null;
+    brief?: Partial<CreativeBrief> | null;
+    voiceless?: boolean;
+    useKeyframes?: boolean;
   }) =>
     request<{ run_id: string; status: string; provider?: string }>(
       input.draft ? "/api/run/draft" : "/api/run",
@@ -83,8 +89,46 @@ export const api = {
           ...(input.provider ? { provider: input.provider } : {}),
           ...(input.runId ? { run_id: input.runId } : {}),
           ...(input.soulId ? { soul_id: input.soulId } : {}),
+          ...(input.brief ? { brief: input.brief } : {}),
+          ...(input.voiceless ? { voiceless: true } : {}),
+          ...(input.useKeyframes ? { use_keyframes: true } : {}),
         }),
       }
+    ),
+
+  updateShotPlan: (runId: string, plan: ShotPlan) =>
+    request<{ run_id: string; shot_plan: ShotPlan }>(
+      `/api/runs/${runId}/shot-plan`,
+      {
+        method: "PUT",
+        body: JSON.stringify(plan),
+      }
+    ),
+
+  refineShot: (runId: string, shotIndex: number, instruction: string) =>
+    request<{ run_id: string; shot_index: number; shot: Shot }>(
+      `/api/runs/${runId}/shot-plan/refine`,
+      {
+        method: "POST",
+        body: JSON.stringify({ shot_index: shotIndex, instruction }),
+      }
+    ),
+
+  regenerateClip: (runId: string, clipIndex: number, extraInstruction?: string) =>
+    request<{ run_id: string; clip_index: number; path: string; bytes: number | null }>(
+      `/api/runs/${runId}/clips/${clipIndex}/regenerate`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          ...(extraInstruction ? { extra_instruction: extraInstruction } : {}),
+        }),
+      }
+    ),
+
+  reassembleRun: (runId: string) =>
+    request<{ run_id: string; final_video_path: string; exists: boolean }>(
+      `/api/runs/${runId}/reassemble`,
+      { method: "POST" }
     ),
 
   higgsfieldStatus: () => request<HiggsfieldStatus>("/api/higgsfield/status"),

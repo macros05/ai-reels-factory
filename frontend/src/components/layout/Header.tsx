@@ -8,13 +8,20 @@ export function Header() {
   const navigate = useNavigate();
 
   return (
-    <header className="sticky top-0 z-40 w-full border-b border-zinc-900 bg-zinc-950/80 backdrop-blur">
-      <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-4 sm:px-6">
-        <Link to="/" className="group flex items-center gap-2">
-          <div className="flex size-7 items-center justify-center rounded-md bg-violet-500/15 text-violet-400 transition-colors group-hover:bg-violet-500/25">
+    <header className="sticky top-0 z-40 w-full border-b border-white/[0.05] bg-[color:var(--color-ink-950)]/70 backdrop-blur-xl">
+      <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4 sm:px-6">
+        <Link to="/" className="group flex items-center gap-2.5">
+          <div className="relative flex size-8 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500/30 via-violet-400/15 to-cyan-400/20 text-violet-100 ring-1 ring-inset ring-white/10 transition-all group-hover:ring-violet-300/30">
             <Sparkles className="size-4" />
           </div>
-          <span className="text-sm font-semibold tracking-tight">Reels Factory</span>
+          <div className="flex flex-col leading-none">
+            <span className="text-sm font-semibold tracking-tight text-zinc-50">
+              Reels Factory
+            </span>
+            <span className="mono text-[10px] uppercase tracking-[0.18em] text-zinc-500">
+              Higgsfield · Claude
+            </span>
+          </div>
         </Link>
         {isAuthenticated && (
           <Button

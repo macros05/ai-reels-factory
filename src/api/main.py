@@ -521,6 +521,136 @@ async def update_shot_plan(run_id: str, body: dict[str, Any]) -> dict[str, Any]:
     return {"run_id": run_id, "shot_plan": plan.model_dump()}
 
 
+@api_router.post("/runs/{run_id}/clips/{clip_index}/regenerate")
+async def regenerate_clip(
+    run_id: str,
+    clip_index: int,
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    """Regenerate a single clip using its persisted shot prompt.
+
+    Cheap-path: skips script, director, voice, subtitles and assembly. Only
+    the chosen provider's video call burns credits. Body accepts an optional
+    `extra_instruction` (string) that is appended to the prompt before send.
+
+    The frontend wires the editor's "Regenerar este clip" button here, and
+    after a successful call should hit /api/runs/{run_id}/reassemble to
+    rebuild video.mp4 with the new clip.
+    """
+    from src.clients.higgsfield import (
+        download_to_path,
+        extract_video_url,
+        get_higgsfield_cli,
+    )
+    from src.steps.video_generator import _build_clip_flags
+
+    runs = {r.run_id: r for r in _all_runs()}
+    r = runs.get(run_id)
+    if r is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    if r.shot_plan is None or not r.shot_plan.shots:
+        raise HTTPException(status_code=409, detail="run has no shot_plan")
+    if not (0 <= clip_index < len(r.shot_plan.shots)):
+        raise HTTPException(
+            status_code=400,
+            detail=f"clip_index {clip_index} out of range",
+        )
+
+    provider: VideoProvider = (r.provider or settings.video_provider)  # type: ignore[assignment]
+    duration = settings.clip_duration_for(provider)
+    shot = r.shot_plan.shots[clip_index]
+    extra = str(body.get("extra_instruction") or "").strip()
+    prompt = shot.final_prompt or ""
+    if extra:
+        prompt = f"{prompt.rstrip('. ')}. {extra.rstrip('. ')}"
+    if r.shot_plan.style_brief:
+        prompt = f"{prompt.rstrip('. ')}. {r.shot_plan.style_brief}"
+    prompt = f"{prompt.rstrip('. ')}. {settings.motion_prompt_suffix}"
+
+    cli = get_higgsfield_cli()
+    flags = _build_clip_flags(
+        provider=provider,
+        duration=duration,
+        start_image_uuid=None,
+        audio_uuid=None,
+    )
+    try:
+        result = await cli.generate(
+            settings.cli_model_for(provider),
+            prompt=prompt,
+            wait=True,
+            wait_timeout="20m",
+            **flags,
+        )
+        url = extract_video_url(result)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"video provider failed: {exc}") from exc
+
+    clips_dir = settings.output_dir / run_id / "clips"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+    clip_path = clips_dir / f"clip_{clip_index:02d}.mp4"
+    await download_to_path(url, clip_path)
+    return {
+        "run_id": run_id,
+        "clip_index": clip_index,
+        "path": str(clip_path.resolve()),
+        "bytes": clip_path.stat().st_size if clip_path.exists() else None,
+    }
+
+
+@api_router.post("/runs/{run_id}/reassemble")
+async def reassemble_run(run_id: str) -> dict[str, Any]:
+    """Rebuild video.mp4 from the current clip set without touching providers."""
+    from src.models import VoiceOutput
+    from src.steps.assembler import AssemblerStep
+
+    runs = {r.run_id: r for r in _all_runs()}
+    r = runs.get(run_id)
+    if r is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    if r.script is None:
+        raise HTTPException(status_code=409, detail="run has no script yet")
+
+    output_dir = settings.output_dir / run_id
+    clips_dir = output_dir / "clips"
+    if not clips_dir.exists():
+        raise HTTPException(status_code=409, detail="no clips/ directory yet")
+    clip_paths = sorted(clips_dir.glob("clip_*.mp4"))
+    if not clip_paths:
+        raise HTTPException(status_code=409, detail="no clip_XX.mp4 files")
+
+    voice = None
+    audio_path = output_dir / "audio.mp3"
+    if audio_path.exists():
+        voice = VoiceOutput(audio_path=audio_path, duration_seconds=0.0)
+
+    context: dict[str, Any] = {
+        "script": r.script,
+        "output_dir": output_dir,
+        "video_clips": clip_paths,
+        "video_provider": r.provider,
+        "references": r.references,
+        "voice": voice,
+    }
+    try:
+        await AssemblerStep().run(context)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"assemble failed: {exc}") from exc
+    final = output_dir / "video.mp4"
+    r.final_video_path = final
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "result.json").write_text(
+        r.model_dump_json(indent=2), encoding="utf-8"
+    )
+    async with _LOCK:
+        _RUN_STATE[run_id] = r
+    return {
+        "run_id": run_id,
+        "final_video_path": str(final.resolve()),
+        "exists": final.exists(),
+    }
+
+
 @api_router.post("/runs/{run_id}/shot-plan/refine")
 async def refine_shot(run_id: str, body: dict[str, Any]) -> dict[str, Any]:
     """Refine a single shot via Claude using a natural-language instruction.

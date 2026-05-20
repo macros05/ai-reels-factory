@@ -1,11 +1,32 @@
 # ai-reels-factory
 
-Pipeline end-to-end que genera reels hiperrealistas con IA y los deja listos para publicar en Instagram. Le pasas un **tema** y obtienes:
+Studio end-to-end para producir reels hiperrealistas dirigidos por **Claude** y renderizados por **Higgsfield**. Le pasas un brief rico (tema · audiencia · tono · mood · vibra visual · referencias · character) y obtienes:
 
-- `video.mp4` — vertical 1080×1920, 20-30s, voz sincronizada y subtítulos quemados
+- `video.mp4` — vertical 1080×1920, 20-30s, voz sincronizada (o solo música) y subtítulos quemados opcionales
 - `caption.txt` — copy + hashtags
-- `script.json` — guion, prompts visuales y metadatos para debug
-- `audio.mp3`, `subtitles.srt`, `clips/clip_XX.mp4` — artefactos intermedios
+- `script.json` — guion editable (hook · body · cta · caption · hashtags · visual_prompts)
+- `result.json` — incluye el **shot plan** frame-by-frame del director (shot size, lente, cámara, luz, beats temporales, paleta y prompt final por clip)
+- `audio.mp3`, `subtitles.srt`, `clips/clip_XX.mp4` — artefactos intermedios reutilizables
+
+Dos formas de orquestar — equivalentes y complementarias:
+
+1. **Interfaz web** — formulario con brief estructurado (chips de tono/mood/vibra, paleta, CTA, notas, voiceless, keyframes con Nano-Banana-Pro, Soul-ID, referencias), editor del guion y editor del **shot plan frame-by-frame**: hand-edit de cada campo, "Pedir al director" en lenguaje natural sobre un shot concreto, regeneración de un único clip y re-ensamblado del MP4 sin tocar Claude/ElevenLabs.
+2. **MCP server** (`reels-mcp`) — Claude Desktop / Claude Code / cualquier cliente MCP conduce el pipeline con tools tipadas: `create_reel`, `get_shot_plan`, `refine_shot`, `update_shot`, `replace_shot_plan`, `update_script`, `confirm_run`, `regenerate_clip`, `reassemble`, `add_reference`, `set_brief`, `wait_until_status`, etc. **La misma cobertura que la interfaz**, controlable desde el chat.
+
+## Flujo
+
+```
+brief (UI / MCP)
+  └── script_generator   ← Claude: hook · body · cta · caption · hashtags · prompts borrador
+        └── style_extractor   ← Claude vision: 60-word brief de paleta/óptica/mood a partir de refs
+              └── director           ← Claude: shot plan frame-by-frame (shot size · lente · cámara · luz · beats · prompt final)
+                    └── voice_generator    ← ElevenLabs (omitido si voiceless o Veo)
+                          └── video_generator    ← Higgsfield CLI: clips usando shot.final_prompt
+                                └── subtitle_generator ← whisper-timestamped (opcional)
+                                      └── assembler   ← ffmpeg: concat · audio · music bed · subs · loudnorm
+```
+
+El director es el añadido clave de v0.3: convierte el guion + las referencias + el brief estructurado en un plan de rodaje con cinematografía concreta por clip. El video_generator prefiere `shot.final_prompt` y cae al `visual_prompts` del script si el director falla. La UI y el MCP exponen el plan para revisión y edición manual o asistida por Claude.
 
 ## Stack
 
@@ -24,6 +45,51 @@ Pipeline end-to-end que genera reels hiperrealistas con IA y los deja listos par
 | Ensamblado | `ffmpeg-python` |
 | Logging | `loguru` |
 | Config | `pydantic-settings` |
+
+## MCP — Claude conduce el pipeline
+
+`reels-mcp` es un servidor MCP (stdio) que expone el mismo backend al que llama
+la UI. Una vez configurado, dile a Claude cosas como _"crea un reel sobre el
+ritual del café especialidad con mood intimista y paleta cálida; cuando esté el
+shot plan, refina el shot 2 para que sea wide al amanecer y regenera ese clip"_
+y Claude maneja la orquestación entera.
+
+Añade esto a `~/Library/Application Support/Claude/claude_desktop_config.json`
+(macOS) o equivalente:
+
+```json
+{
+  "mcpServers": {
+    "ai-reels-factory": {
+      "command": "uv",
+      "args": ["run", "reels-mcp"],
+      "cwd": "/ruta/absoluta/a/ai-reels-factory"
+    }
+  }
+}
+```
+
+Tools disponibles (resumen):
+
+| Tool | Qué hace |
+|---|---|
+| `create_reel` | Arranca un reel con brief estructurado (audience, tone, mood, visual_vibe, palette, cta_goal, extra_notes), Soul-ID, voiceless, keyframes |
+| `get_run` · `list_runs` · `wait_until_status` | Estado del pipeline, polling, terminales |
+| `get_script` · `update_script` | Lee y reescribe el guion sin volver a llamar a Claude |
+| `confirm_run` | Reanuda un run en `script_ready` con el guion editado |
+| `get_shot_plan` · `replace_shot_plan` · `update_shot` · `refine_shot` | Plan frame-by-frame: lee, sobreescribe, parchea un campo, o pídele a Claude que reescriba un shot desde una instrucción en lenguaje natural |
+| `regenerate_clip` · `reassemble` | Re-renderiza un clip individual (sólo paga el provider de vídeo de ese clip) y re-ensambla el MP4 final reusando el resto de artefactos |
+| `add_reference` · `list_references` | Adjunta archivos (persona, style, script, voice, music) al run |
+| `get_brief` · `set_brief` | Lee/parchea el brief estructurado |
+| `get_final_video_path` · `providers_info` | Rutas, proveedores disponibles |
+
+Ejemplo de prompt a Claude para una sesión típica:
+
+> "Genera un reel sobre cómo dormir mejor sin pastillas. Audiencia: founders 25-40
+> hispanohablantes. Tono íntimo, calmado. Mood cinematográfico, premium. Vibra:
+> luz dorada, shallow DOF, handheld. Cuando llegue a `script_ready` enséñame el
+> guion. Si el CTA me convence confírmalo. Cuando esté el shot plan, dame los 5
+> shots resumidos. Si el shot 0 no me cuadra te pido que lo refines."
 
 ## Estructura
 

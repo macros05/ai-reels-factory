@@ -43,6 +43,54 @@ export interface ScriptOutput {
   persona_gender: "female" | "male";
 }
 
+export type ShotSize =
+  | "extreme_close_up"
+  | "close_up"
+  | "medium_close_up"
+  | "medium"
+  | "medium_wide"
+  | "wide"
+  | "extreme_wide";
+
+export interface Shot {
+  index: number;
+  shot_size: ShotSize;
+  camera_move: string;
+  lens_mm: number;
+  aperture: string;
+  lighting: string;
+  location: string;
+  wardrobe: string;
+  props: string[];
+  action_beats: string[];
+  dialogue_excerpt: string;
+  emotion: string;
+  color_palette: string;
+  transition_in: string;
+  transition_out: string;
+  duration_seconds: number;
+  final_prompt: string;
+}
+
+export interface ShotPlan {
+  title: string;
+  logline: string;
+  style_brief: string;
+  persona_lock: string;
+  shots: Shot[];
+}
+
+export interface CreativeBrief {
+  topic: string;
+  audience: string | null;
+  tone: string[];
+  mood: string[];
+  visual_vibe: string[];
+  palette: string | null;
+  cta_goal: string | null;
+  extra_notes: string | null;
+}
+
 export interface RunSummary {
   run_id: string;
   topic: string;
@@ -59,6 +107,8 @@ export interface RunSummary {
 
 export interface RunDetail extends RunSummary {
   script: ScriptOutput | null;
+  shot_plan: ShotPlan | null;
+  brief: CreativeBrief | null;
   caption: string | null;
 }
 
