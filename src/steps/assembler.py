@@ -93,6 +93,36 @@ class AssemblerStep:
         return context
 
 
+def _clip_has_audio(path: Path) -> bool:
+    """Probe a clip for an audio stream — Kling 3.0 + Seedance return silent
+    clips, Veo 3.1 returns native audio. Branch 4 of the audio chain only
+    works for the latter; we use this to fall back to silence otherwise.
+    """
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "a",
+                "-show_entries",
+                "stream=codec_name",
+                "-of",
+                "csv=p=0",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return bool(out.stdout.strip())
+    except Exception:
+        return False
+
+
 def _assemble(
     *,
     clip_paths: list[Path],
@@ -126,6 +156,14 @@ def _assemble(
     # audio so the loudnorm filter at the end has something to normalise.
     drop_native_audio = audio_path is None and music_path is not None
 
+    # Detect whether the source clips actually carry audio. Kling 3.0 and
+    # Seedance render silent clips; Veo 3.1 renders with native audio. Branch
+    # 4 of _build_audio_chain (passthrough+loudnorm) needs native audio to
+    # exist, so when it doesn't we have to synthesise silence instead.
+    has_native_audio = (
+        bool(clip_paths) and _clip_has_audio(clip_paths[0])
+    )
+
     concat_kwargs: dict[str, Any] = {
         "vf": video_filter,
         "c:v": "libx264",
@@ -134,9 +172,9 @@ def _assemble(
         "pix_fmt": "yuv420p",
         "r": 30,
     }
-    if audio_path is not None or drop_native_audio:
-        # No native audio in the concat — voice + music get added in the
-        # final mux pass below.
+    if audio_path is not None or drop_native_audio or not has_native_audio:
+        # No native audio in the concat — voice + music (or silence) get
+        # added in the final mux pass below.
         concat_kwargs["an"] = None
     else:
         concat_kwargs["c:a"] = "aac"
@@ -174,13 +212,14 @@ def _assemble(
         srt_abs = str(Path(srt_path).resolve())
         burned_video = video_in.video.filter("subtitles", srt_abs, force_style=subtitle_style)
 
-    # Assemble final audio. Branch on (voice?, music?):
+    # Assemble final audio. Branch on (voice?, music?, native?):
     final_audio = _build_audio_chain(
         ffmpeg=ffmpeg,
         video_in=video_in,
         voice_path=audio_path,
         music_path=music_path,
         drop_native_audio=drop_native_audio,
+        has_native_audio=has_native_audio,
     )
 
     output_kwargs: dict[str, Any] = {
@@ -211,6 +250,7 @@ def _build_audio_chain(
     voice_path: Path | None,
     music_path: Path | None,
     drop_native_audio: bool,
+    has_native_audio: bool = True,
 ) -> Any:
     """Return the ffmpeg audio node to mux into the final output.
 
@@ -262,4 +302,10 @@ def _build_audio_chain(
 
     # Branch 4: native audio passthrough with normalisation (Veo, no music)
     _ = drop_native_audio  # unused in this branch; declared to keep linter happy
-    return video_in.audio.filter("loudnorm", I=-14, LRA=11, TP=-1.0)
+    if has_native_audio:
+        return video_in.audio.filter("loudnorm", I=-14, LRA=11, TP=-1.0)
+    # Branch 4b: nothing at all — synthesise silent stereo so the muxer has
+    # an audio track. This is the voiceless+no-music+Kling/Seedance path.
+    return ffmpeg.input(
+        "anullsrc=channel_layout=stereo:sample_rate=44100", f="lavfi"
+    ).audio
