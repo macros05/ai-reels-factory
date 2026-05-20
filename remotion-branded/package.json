@@ -1,0 +1,22 @@
+{
+  "name": "remotion-branded-ads",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "studio": "remotion studio",
+    "render": "remotion render Demo out/demo.mp4 --concurrency=2",
+    "build": "remotion render Demo out/demo.mp4 --concurrency=2 --crf=18 --image-format=jpeg"
+  },
+  "dependencies": {
+    "@remotion/bundler": "4.0.378",
+    "@remotion/cli": "4.0.378",
+    "@remotion/renderer": "4.0.378",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "remotion": "4.0.378"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.18",
+    "typescript": "5.7.2"
+  }
+}

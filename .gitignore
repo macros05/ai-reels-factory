@@ -1,0 +1,43 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+.env
+.env.local
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.DS_Store
+output/
+!output/.gitkeep
+# Persistent app data (characters.db, character photos). Bind-mounted in prod
+# from the host; never committed.
+data/
+*.log
+.idea/
+.vscode/
+uv.lock
+
+# frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/package-lock.json
+frontend/*.tsbuildinfo
+frontend/**/*.tsbuildinfo
+
+# remotion (template-only repo; assets, node_modules and outputs are local)
+remotion-branded/node_modules/
+remotion-branded/out/
+remotion-branded/public/
+!remotion-branded/public/.gitkeep
