@@ -1,7 +1,8 @@
-import { Link, useNavigate } from "react-router-dom";
-import { LogOut, Sparkles } from "lucide-react";
+import { Link, NavLink, useNavigate } from "react-router-dom";
+import { BookOpen, LogOut, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/useAuth";
+import { cn } from "@/lib/utils";
 
 export function Header() {
   const { isAuthenticated, logout } = useAuth();
@@ -24,17 +25,33 @@ export function Header() {
           </div>
         </Link>
         {isAuthenticated && (
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => {
-              logout();
-              navigate("/login");
-            }}
-          >
-            <LogOut className="size-3.5" />
-            <span className="hidden sm:inline">Cerrar sesión</span>
-          </Button>
+          <div className="flex items-center gap-1">
+            <NavLink
+              to="/help"
+              className={({ isActive }) =>
+                cn(
+                  "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[13px] font-medium transition-all",
+                  isActive
+                    ? "bg-white/[0.06] text-zinc-50"
+                    : "text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-200"
+                )
+              }
+            >
+              <BookOpen className="size-3.5" />
+              <span className="hidden sm:inline">Ayuda</span>
+            </NavLink>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                logout();
+                navigate("/login");
+              }}
+            >
+              <LogOut className="size-3.5" />
+              <span className="hidden sm:inline">Cerrar sesión</span>
+            </Button>
+          </div>
         )}
       </div>
     </header>
